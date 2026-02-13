@@ -143,7 +143,7 @@ ${question}
 /* ---------------------------------------
    Health check
 ---------------------------------------- */
-router.get("/health", async (req, res) => {
+router.get("/status", async (req, res) => {
   try {
     await pool.query("SELECT 1");
     res.json({
@@ -161,3 +161,4 @@ router.get("/health", async (req, res) => {
 });
 
 export default router;
+
