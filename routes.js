@@ -4,13 +4,45 @@ import { askLLM } from "./llm.js";
 
 const router = express.Router();
 
-/* Upload document */
+/* ---------------------------------------
+   Helper: score a document by keywords
+---------------------------------------- */
+function scoreDocument(text, keywords) {
+  const lowerText = text.toLowerCase();
+  let score = 0;
+
+  for (const word of keywords) {
+    if (lowerText.includes(word)) {
+      score++;
+    }
+  }
+  return score;
+}
+
+/* ---------------------------------------
+   GET all documents
+---------------------------------------- */
+router.get("/documents", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, name FROM documents ORDER BY id DESC"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Fetch documents error:", err);
+    res.status(500).json({ error: "Failed to fetch documents" });
+  }
+});
+
+/* ---------------------------------------
+   Upload document
+---------------------------------------- */
 router.post("/documents", async (req, res) => {
   try {
     const { name, content } = req.body;
 
     if (!name || !content) {
-      return res.status(400).json({ error: "Invalid input" });
+      return res.status(400).json({ error: "Name and content required" });
     }
 
     await pool.query(
@@ -18,72 +50,100 @@ router.post("/documents", async (req, res) => {
       [name, content]
     );
 
-    res.json({ message: "Document uploaded" });
+    res.json({ message: "Document uploaded successfully" });
   } catch (err) {
-    console.error("Upload error:", err);
-    res.status(500).json({ error: "Upload failed" });
+    console.error("Upload document error:", err);
+    res.status(500).json({ error: "Failed to upload document" });
   }
 });
 
-/* List documents */
-router.get("/documents", async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      "SELECT id, name FROM documents"
-    );
-    res.json(rows);
-  } catch (err) {
-    console.error("Fetch documents error:", err);
-    res.json([]);
-  }
-});
-
-/* Ask question */
+/* ---------------------------------------
+   ASK QUESTION (SCAN ALL DOCS → BEST MATCH)
+---------------------------------------- */
 router.post("/ask", async (req, res) => {
   try {
     const { question } = req.body;
 
     if (!question) {
-      return res.status(400).json({ error: "Question required" });
+      return res.status(400).json({ error: "Question is required" });
     }
 
-    const { rows: docs } = await pool.query(
-      "SELECT * FROM documents"
+    // 1. Fetch ALL documents
+    const result = await pool.query(
+      "SELECT id, name, content FROM documents"
     );
+    const documents = result.rows;
 
-    if (docs.length === 0) {
+    if (documents.length === 0) {
       return res.json({
-        answer: "No documents uploaded yet.",
+        answer: "No documents available.",
         source: "-",
         snippet: "-"
       });
     }
 
-    const keyword = question.split(" ")[0].toLowerCase();
-    const matchedDoc =
-      docs.find(d =>
-        d.content.toLowerCase().includes(keyword)
-      ) || docs[0];
+    // 2. Extract keywords from question
+    const keywords = question
+      .toLowerCase()
+      .split(/\W+/)
+      .filter(word => word.length > 2);
 
-    const answer = await askLLM(question, matchedDoc.content);
+    // 3. Find BEST matching document
+    let bestDoc = null;
+    let bestScore = 0;
+
+    for (const doc of documents) {
+      const score = scoreDocument(doc.content, keywords);
+      if (score > bestScore) {
+        bestScore = score;
+        bestDoc = doc;
+      }
+    }
+
+    // 4. If no document is relevant
+    if (!bestDoc || bestScore === 0) {
+      return res.json({
+        answer:
+          "I don't know. (The answer is not present in the uploaded documents.)",
+        source: "-",
+        snippet: "-"
+      });
+    }
+
+    // 5. Ask LLM ONLY with best document
+    const prompt = `
+Answer the question using ONLY the text below.
+If the answer is not present, say "I don't know".
+
+Document:
+${bestDoc.content}
+
+Question:
+${question}
+`;
+
+    const answer = await askLLM(prompt);
+
+    // 6. Create snippet
+    const snippet =
+      bestDoc.content.slice(0, 300) +
+      (bestDoc.content.length > 300 ? "..." : "");
 
     res.json({
       answer,
-      source: matchedDoc.name,
-      snippet: matchedDoc.content.substring(0, 200)
+      source: bestDoc.name,
+      snippet
     });
   } catch (err) {
-    console.error("Ask error:", err);
-    res.status(500).json({
-      answer: "Error generating answer",
-      source: "-",
-      snippet: "-"
-    });
+    console.error("Ask question error:", err);
+    res.status(500).json({ error: "Failed to answer question" });
   }
 });
 
-/* Status */
-router.get("/status", async (req, res) => {
+/* ---------------------------------------
+   Health check
+---------------------------------------- */
+router.get("/health", async (req, res) => {
   try {
     await pool.query("SELECT 1");
     res.json({
@@ -91,7 +151,7 @@ router.get("/status", async (req, res) => {
       database: "connected",
       llm: "reachable"
     });
-  } catch (err) {
+  } catch {
     res.status(500).json({
       backend: "ok",
       database: "error",
