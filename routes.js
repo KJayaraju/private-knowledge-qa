@@ -5,18 +5,38 @@ import { askLLM } from "./llm.js";
 const router = express.Router();
 
 /* ---------------------------------------
-   Helper: score a document by keywords
+   Helper: score document by keyword frequency
 ---------------------------------------- */
 function scoreDocument(text, keywords) {
   const lowerText = text.toLowerCase();
   let score = 0;
 
   for (const word of keywords) {
-    if (lowerText.includes(word)) {
-      score++;
+    const matches = lowerText.match(new RegExp(`\\b${word}\\b`, "g"));
+    if (matches) {
+      score += matches.length;
     }
   }
+
   return score;
+}
+
+/* ---------------------------------------
+   Helper: extract snippet around keyword
+---------------------------------------- */
+function extractSnippet(text, keywords) {
+  const lowerText = text.toLowerCase();
+
+  for (const word of keywords) {
+    const index = lowerText.indexOf(word);
+    if (index !== -1) {
+      const start = Math.max(0, index - 120);
+      const end = Math.min(text.length, index + 180);
+      return text.slice(start, end) + "...";
+    }
+  }
+
+  return text.slice(0, 300) + "...";
 }
 
 /* ---------------------------------------
@@ -29,7 +49,7 @@ router.get("/documents", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error("Fetch documents error:", err);
+    console.error(err);
     res.status(500).json({ error: "Failed to fetch documents" });
   }
 });
@@ -38,81 +58,70 @@ router.get("/documents", async (req, res) => {
    Upload document
 ---------------------------------------- */
 router.post("/documents", async (req, res) => {
-  try {
-    const { name, content } = req.body;
+  const { name, content } = req.body;
 
-    if (!name || !content) {
-      return res.status(400).json({ error: "Name and content required" });
-    }
-
-    await pool.query(
-      "INSERT INTO documents (name, content) VALUES ($1, $2)",
-      [name, content]
-    );
-
-    res.json({ message: "Document uploaded successfully" });
-  } catch (err) {
-    console.error("Upload document error:", err);
-    res.status(500).json({ error: "Failed to upload document" });
+  if (!name || !content) {
+    return res.status(400).json({ error: "Name and content required" });
   }
+
+  await pool.query(
+    "INSERT INTO documents (name, content) VALUES ($1, $2)",
+    [name, content]
+  );
+
+  res.json({ message: "Document uploaded" });
 });
 
 /* ---------------------------------------
-   ASK QUESTION (SCAN ALL DOCS → BEST MATCH)
+   ASK QUESTION (SCAN ALL → BEST MATCH)
 ---------------------------------------- */
 router.post("/ask", async (req, res) => {
-  try {
-    const { question } = req.body;
+  const { question } = req.body;
 
-    if (!question) {
-      return res.status(400).json({ error: "Question is required" });
+  if (!question) {
+    return res.status(400).json({ error: "Question required" });
+  }
+
+  const result = await pool.query(
+    "SELECT name, content FROM documents"
+  );
+
+  const documents = result.rows;
+
+  if (documents.length === 0) {
+    return res.json({
+      answer: "No documents available.",
+      source: "-",
+      snippet: "-"
+    });
+  }
+
+  const keywords = question
+    .toLowerCase()
+    .split(/\W+/)
+    .filter(w => w.length > 2);
+
+  let bestDoc = null;
+  let bestScore = 0;
+
+  for (const doc of documents) {
+    const score = scoreDocument(doc.content, keywords);
+    if (score > bestScore) {
+      bestScore = score;
+      bestDoc = doc;
     }
+  }
 
-    // 1. Fetch ALL documents
-    const result = await pool.query(
-      "SELECT id, name, content FROM documents"
-    );
-    const documents = result.rows;
+  if (!bestDoc || bestScore === 0) {
+    return res.json({
+      answer: "I don't know. The answer is not in the documents.",
+      source: "-",
+      snippet: "-"
+    });
+  }
 
-    if (documents.length === 0) {
-      return res.json({
-        answer: "No documents available.",
-        source: "-",
-        snippet: "-"
-      });
-    }
-
-    // 2. Extract keywords from question
-    const keywords = question
-      .toLowerCase()
-      .split(/\W+/)
-      .filter(word => word.length > 2);
-
-    // 3. Find BEST matching document
-    let bestDoc = null;
-    let bestScore = 0;
-
-    for (const doc of documents) {
-      const score = scoreDocument(doc.content, keywords);
-      if (score > bestScore) {
-        bestScore = score;
-        bestDoc = doc;
-      }
-    }
-
-    // 4. If no document is relevant
-    if (!bestDoc || bestScore === 0) {
-      return res.json({
-        answer:
-          "I don't know. (The answer is not present in the uploaded documents.)",
-        source: "-",
-        snippet: "-"
-      });
-    }
-
-    // 5. Ask LLM ONLY with best document
-    const prompt = `
-Answer the question using ONLY the text below.
+  const prompt = `
+Answer the question using ONLY the document below.
 If the answer is not present, say "I don't know".
 
 Document:
@@ -122,26 +131,19 @@ Question:
 ${question}
 `;
 
-    const answer = await askLLM(prompt);
+  const answer = await askLLM(prompt);
 
-    // 6. Create snippet
-    const snippet =
-      bestDoc.content.slice(0, 300) +
-      (bestDoc.content.length > 300 ? "..." : "");
+  const snippet = extractSnippet(bestDoc.content, keywords);
 
-    res.json({
-      answer,
-      source: bestDoc.name,
-      snippet
-    });
-  } catch (err) {
-    console.error("Ask question error:", err);
-    res.status(500).json({ error: "Failed to answer question" });
-  }
+  res.json({
+    answer,
+    source: bestDoc.name,
+    snippet
+  });
 });
 
 /* ---------------------------------------
-   Health check
+   Status (for frontend)
 ---------------------------------------- */
 router.get("/status", async (req, res) => {
   try {
@@ -161,4 +163,3 @@ router.get("/status", async (req, res) => {
 });
 
 export default router;
-
