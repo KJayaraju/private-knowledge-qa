@@ -76,70 +76,90 @@ router.post("/documents", async (req, res) => {
    ASK QUESTION (SCAN ALL → BEST MATCH)
 ---------------------------------------- */
 router.post("/ask", async (req, res) => {
-  const { question } = req.body;
+  try {
+    const { question } = req.body;
 
-  if (!question) {
-    return res.status(400).json({ error: "Question required" });
-  }
-
-  const result = await pool.query(
-    "SELECT name, content FROM documents"
-  );
-
-  const documents = result.rows;
-
-  if (documents.length === 0) {
-    return res.json({
-      answer: "No documents available.",
-      source: "-",
-      snippet: "-"
-    });
-  }
-
-  const keywords = question
-    .toLowerCase()
-    .split(/\W+/)
-    .filter(w => w.length > 2);
-
-  let bestDoc = null;
-  let bestScore = 0;
-
-  for (const doc of documents) {
-    const score = scoreDocument(doc.content, keywords);
-    if (score > bestScore) {
-      bestScore = score;
-      bestDoc = doc;
+    if (!question) {
+      return res.status(400).json({ error: "Question is required" });
     }
-  }
 
-  if (!bestDoc || bestScore === 0) {
-    return res.json({
-      answer: "I don't know. The answer is not in the documents.",
-      source: "-",
-      snippet: "-"
+    // 1. Fetch ALL documents
+    const result = await pool.query(
+      "SELECT name, content FROM documents"
+    );
+    const documents = result.rows;
+
+    if (documents.length === 0) {
+      return res.json({
+        answer: "No documents uploaded.",
+        source: "-",
+        snippet: "-"
+      });
+    }
+
+    // 2. Extract keywords from question
+    const keywords = question
+      .toLowerCase()
+      .split(/\W+/)
+      .filter(w => w.length > 2);
+
+    // 3. Select ALL relevant documents
+    const relevantDocs = documents.filter(doc => {
+      const text = doc.content.toLowerCase();
+      return keywords.some(word => text.includes(word));
     });
-  }
 
-  const prompt = `
-Answer the question using ONLY the document below.
-If the answer is not present, say "I don't know".
+    if (relevantDocs.length === 0) {
+      return res.json({
+        answer: "I don't know. The uploaded documents do not contain this information.",
+        source: "-",
+        snippet: "-"
+      });
+    }
 
-Document:
-${bestDoc.content}
+    // 4. Combine ALL relevant documents
+    const combinedText = relevantDocs
+      .map(
+        (doc, i) =>
+          `Document ${i + 1} (${doc.name}):\n${doc.content}`
+      )
+      .join("\n\n---\n\n");
 
-Question:
+    // 5. STRONG LLM PROMPT (multi-document)
+    const prompt = `
+You are an assistant that answers questions using ONLY the documents below.
+
+Rules:
+- Use ALL documents provided.
+- If the answer exists, you MUST answer it.
+- Do NOT use external knowledge.
+- Do NOT hallucinate.
+
+DOCUMENTS:
+${combinedText}
+
+QUESTION:
 ${question}
+
+ANSWER:
 `;
 
-  const answer = await askLLM(prompt);
+    const answer = await askLLM(prompt);
 
-  const snippet = extractSnippet(bestDoc.content, keywords);
+    // 6. Snippet (first 500 chars from combined docs)
+    const snippet =
+      combinedText.slice(0, 500) +
+      (combinedText.length > 500 ? "..." : "");
 
-  res.json({
-    answer,
-    source: bestDoc.name,
-    snippet
-  });
+    res.json({
+      answer: answer.trim(),
+      source: relevantDocs.map(d => d.name).join(", "),
+      snippet
+    });
+  } catch (err) {
+    console.error("Ask error:", err);
+    res.status(500).json({ error: "Failed to answer question" });
+  }
 });
 
 /* ---------------------------------------
@@ -163,3 +183,4 @@ router.get("/status", async (req, res) => {
 });
 
 export default router;
+
