@@ -7,11 +7,9 @@ dotenv.config();
 
 const app = express();
 
-app.use(
-  cors({
-    origin: "http://localhost:3000"
-  })
-);
+app.use(cors({
+  origin: "*"
+}));
 
 app.use(express.json());
 app.use("/", routes);
@@ -20,4 +18,5 @@ const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
   console.log(`Backend running on port ${PORT}`);
+
 });
